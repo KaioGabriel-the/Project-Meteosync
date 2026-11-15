@@ -1,0 +1,11 @@
+[project]
+name = "meteosync"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "python-dotenv>=1.2.4",
+    "requests>=2.34.2",
+    "tzdata>=2024.1",
+]
