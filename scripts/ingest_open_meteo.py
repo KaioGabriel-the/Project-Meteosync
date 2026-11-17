@@ -1,24 +1,21 @@
-import json
-import logging
-
-from datetime import date
+import argparse
+import time
+from datetime import date, datetime, timezone
 from pathlib import Path
-
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util import Retry
+
+from botocore.exceptions import BotoCoreError, ClientError
 
 from config.cities import CITIES
 from scripts.utils.date_ranges import previous_complete_date_range
-
-
-# ==========================================
-# CONFIGURAÇÕES
-# ==========================================
+from scripts.utils.logging_config import configure_ingestion_logger
+from scripts.utils.s3_client import S3ClientWrapper
 
 BASE_URL = "https://api.open-meteo.com/v1/forecast"
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-
-OUTPUT_DIR = PROJECT_ROOT / "data" / "raw" / "open_meteo"
+MAX_HISTORICAL_DAYS = 30
 
 HOURLY_VARIABLES = [
     "temperature_2m",
@@ -29,224 +26,226 @@ HOURLY_VARIABLES = [
     "weather_code",
 ]
 
-# ==========================================
-# LOGGING
-# ==========================================
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
+logger = configure_ingestion_logger(
+    __name__,
+    PROJECT_ROOT / "logs" / "ingest_open_meteo.log",
 )
 
-logger = logging.getLogger(__name__)
+
+def get_resilient_session() -> requests.Session:
+    """Configura sessão HTTP com políticas de Retry e Exponential Backoff."""
+    session = requests.Session()
+    retries = Retry(
+        total=5,
+        backoff_factor=2,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=frozenset({"GET"}),
+        respect_retry_after_header=True,
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retries)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
 
 
-# ==========================================
-# UTILITÁRIOS
-# ==========================================
-
-# ==========================================
-# INGESTÃO
-# ==========================================
-
-def fetch_weather(city: dict, start_date: date, end_date: date) -> dict:
-    """
-    Consulta os dados meteorológicos de uma cidade
-    para os últimos 10 dias completos.
-    """
-
+def fetch_weather_with_telemetry(
+    city: dict,
+    start_date: date | None,
+    end_date: date | None,
+    session: requests.Session | None = None,
+    incremental: bool = False,
+) -> tuple[dict, dict]:
+    session = session or get_resilient_session()
     params = {
         "latitude": city["latitude"],
         "longitude": city["longitude"],
-        "start_date": start_date.isoformat(),
-        "end_date": end_date.isoformat(),
         "hourly": ",".join(HOURLY_VARIABLES),
-        "timezone": city["timezone"],
+        "timezone": "UTC",
         "temperature_unit": "celsius",
         "wind_speed_unit": "kmh",
         "precipitation_unit": "mm",
     }
-
-    response = requests.get(
-        BASE_URL,
-        params=params,
-        timeout=60,
-    )
-
-    response.raise_for_status()
-
-    return response.json()
-
-
-# ==========================================
-# ARMAZENAMENTO BRONZE
-# ==========================================
-
-def save_raw_data(
-    city: dict,
-    data: dict,
-    start_date: date,
-    end_date: date,
-) -> Path:
-    """
-    Salva a resposta original da API em formato JSON.
-    """
-
-    output_path = (
-        OUTPUT_DIR
-        / f"{start_date}_{end_date}"
-    )
-
-    output_path.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    file_path = output_path / f"{city['city_id']}.json"
-
-    with open(
-        file_path,
-        "w",
-        encoding="utf-8",
-    ) as file:
-
-        json.dump(
-            data,
-            file,
-            ensure_ascii=False,
-            indent=4,
+    if incremental:
+        if start_date is not None or end_date is not None:
+            raise ValueError("Não combine --incremental com datas históricas.")
+        params.update({"past_hours": 1, "forecast_hours": 0})
+    else:
+        if start_date is None or end_date is None:
+            raise ValueError("Datas são obrigatórias para a ingestão histórica.")
+        if start_date > end_date:
+            raise ValueError("start_date não pode ser posterior a end_date.")
+        if (end_date - start_date).days + 1 > MAX_HISTORICAL_DAYS:
+            raise ValueError(f"A janela de ingestão não pode exceder {MAX_HISTORICAL_DAYS} dias.")
+        params.update(
+            {
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat(),
+            }
         )
 
-    return file_path
-
-
-# ==========================================
-# PROCESSAMENTO POR CIDADE
-# ==========================================
-
-def ingest_city(city: dict) -> bool:
-    """
-    Executa a ingestão de uma cidade.
-    """
-
-    city_name = city["city"]
+    request_timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    start_time = time.monotonic()
+    response = session.get(BASE_URL, params=params, timeout=60)
+    latency_ms = int((time.monotonic() - start_time) * 1000)
 
     try:
-        start_date, end_date = previous_complete_date_range(
-            city["timezone"],
-        )
+        response.raise_for_status()
+    except requests.HTTPError:
+        logger.error("Open-Meteo respondeu HTTP %s.", response.status_code)
+        raise
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise ValueError("A API Open-Meteo retornou um payload JSON inválido.")
 
-        logger.info(
-            "Iniciando coleta: %s (%s), %s até %s",
-            city_name,
-            city["timezone"],
-            start_date,
-            end_date,
-        )
+    telemetry = {
+        "request_timestamp": request_timestamp,
+        "status_code": response.status_code,
+        "latency_ms": latency_ms,
+        "payload_size_bytes": len(response.content),
+    }
+    return payload, telemetry
 
-        weather_data = fetch_weather(city, start_date, end_date)
 
-        if "hourly" not in weather_data:
-            raise ValueError(
-                "A resposta da API não contém dados horários."
-            )
+def resolve_date_range(
+    start_date: date | None = None,
+    end_date: date | None = None,
+    incremental: bool = False,
+    now: datetime | None = None,
+) -> tuple[date, date]:
+    current_time = now or datetime.now(timezone.utc)
+    if current_time.tzinfo is None:
+        raise ValueError("now precisa incluir fuso horário.")
+    utc_today = current_time.astimezone(timezone.utc).date()
 
-        timestamps = weather_data["hourly"].get(
-            "time",
-            [],
-        )
+    if incremental:
+        if start_date is not None or end_date is not None:
+            raise ValueError("Não combine --incremental com datas históricas.")
+        return utc_today, utc_today
 
-        if len(timestamps) == 0:
-            raise ValueError(
-                "A API retornou uma lista de horários vazia."
-            )
+    if (start_date is None) != (end_date is None):
+        raise ValueError("Informe start_date e end_date juntos.")
+    if start_date is not None and end_date is not None:
+        if start_date > end_date:
+            raise ValueError("start_date não pode ser posterior a end_date.")
+        if (end_date - start_date).days + 1 > MAX_HISTORICAL_DAYS:
+            raise ValueError(f"A janela de ingestão não pode exceder {MAX_HISTORICAL_DAYS} dias.")
+        return start_date, end_date
 
-        expected_hours = 10 * 24
+    return previous_complete_date_range("UTC", days=MAX_HISTORICAL_DAYS, now=current_time)
 
-        if len(timestamps) != expected_hours:
-            logger.warning(
-                "%s retornou %d registros horários; "
-                "eram esperados %d.",
-                city_name,
-                len(timestamps),
-                expected_hours,
-            )
 
-        file_path = save_raw_data(
+def ingest_city(
+    city: dict,
+    s3_wrapper: S3ClientWrapper,
+    start_date: date | None = None,
+    end_date: date | None = None,
+    incremental: bool = False,
+    run_at: datetime | None = None,
+    session: requests.Session | None = None,
+) -> bool:
+    city_name = city["city"]
+    try:
+        range_start, range_end = resolve_date_range(start_date, end_date, incremental, run_at)
+        ingestion_time = run_at or datetime.now(timezone.utc)
+        if ingestion_time.tzinfo is None:
+            raise ValueError("run_at precisa incluir fuso horário.")
+        ingestion_time = ingestion_time.astimezone(timezone.utc)
+        logger.info("Iniciando coleta Open-Meteo: %s | %s até %s", city_name, range_start, range_end)
+
+        data, telemetry = fetch_weather_with_telemetry(
             city,
-            weather_data,
-            start_date,
-            end_date,
+            None if incremental else range_start,
+            None if incremental else range_end,
+            session=session,
+            incremental=incremental,
         )
 
+        hourly_data = data.get("hourly")
+        if not isinstance(hourly_data, dict) or not hourly_data.get("time"):
+            raise ValueError("A resposta da API não contém dados horários.")
+
+        enrichment_payload = {
+            "telemetry": telemetry,
+            "metadata": {
+                "city_id": city["city_id"],
+                "city_name": city_name,
+                "timezone": "UTC",
+                "start_date": range_start.isoformat(),
+                "end_date": range_end.isoformat(),
+            },
+            "data": data,
+        }
+
+        s3_key = (
+            f"open_meteo/year={ingestion_time.year}/month={ingestion_time.month:02d}/"
+            f"day={ingestion_time.day:02d}/open_meteo_{city['city_id']}_"
+            f"{ingestion_time.strftime('%Y%m%dT%H%M%SZ')}.json"
+        )
+
+        destination = s3_wrapper.upload_json(enrichment_payload, s3_key)
         logger.info(
-            "Coleta concluída: %s | %d registros | %s",
+            "Coleta Open-Meteo concluída para %s | Latência: %dms | Destino: %s",
             city_name,
-            len(timestamps),
-            file_path,
+            telemetry["latency_ms"],
+            destination,
         )
-
         return True
 
-    except requests.RequestException as error:
-        logger.error(
-            "Erro na requisição para %s: %s",
-            city_name,
-            error,
-        )
-
-    except (ValueError, KeyError, OSError) as error:
-        logger.error(
-            "Erro ao processar %s: %s",
-            city_name,
-            error,
-        )
-
-    return False
+    except (
+        requests.RequestException,
+        BotoCoreError,
+        ClientError,
+        ValueError,
+        KeyError,
+        OSError,
+    ) as error:
+        logger.error("Erro ao processar Open-Meteo para %s: %s", city_name, error)
+        return False
 
 
-# ==========================================
-# EXECUÇÃO PRINCIPAL
-# ==========================================
-
-def main():
-
+def main(
+    start_date: date | None = None,
+    end_date: date | None = None,
+    incremental: bool = False,
+) -> None:
     logger.info("=" * 50)
-    logger.info("METEOSYNC | OPEN-METEO INGESTION")
+    logger.info("METEOSYNC | OPEN-METEO BRONZE INGESTION")
     logger.info("=" * 50)
 
-    logger.info(
-        "Período da coleta: últimos 10 dias completos no fuso de cada cidade",
-    )
+    run_at = datetime.now(timezone.utc)
+    range_start, range_end = resolve_date_range(start_date, end_date, incremental, run_at)
+    s3_wrapper = S3ClientWrapper()
+    successful, failed = 0, 0
 
-    logger.info(
-        "Total de cidades: %d",
-        len(CITIES),
-    )
+    with get_resilient_session() as session:
+        for city in CITIES:
+            if ingest_city(
+                city,
+                s3_wrapper,
+                None if incremental else range_start,
+                None if incremental else range_end,
+                incremental=incremental,
+                run_at=run_at,
+                session=session,
+            ):
+                successful += 1
+            else:
+                failed += 1
 
-    successful = 0
-    failed = 0
-
-    for city in CITIES:
-
-        if ingest_city(city):
-            successful += 1
-        else:
-            failed += 1
-
-    logger.info("=" * 50)
-    logger.info("RESUMO DA INGESTÃO")
-    logger.info("Cidades processadas: %d", len(CITIES))
-    logger.info("Sucessos: %d", successful)
-    logger.info("Falhas: %d", failed)
-    logger.info("=" * 50)
-
+    logger.info("Resumo Open-Meteo -> Sucessos: %d | Falhas: %d", successful, failed)
     if failed > 0:
-        raise RuntimeError(
-            f"Ingestão finalizada com {failed} falha(s)."
-        )
+        raise RuntimeError(f"Ingestão finalizada com {failed} falha(s).")
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Ingestão Bronze de dados da Open-Meteo.")
+    parser.add_argument("--start-date", type=date.fromisoformat)
+    parser.add_argument("--end-date", type=date.fromisoformat)
+    parser.add_argument(
+        "--incremental",
+        action="store_true",
+        help="Coleta a última hora disponível em UTC.",
+    )
+    arguments = parser.parse_args()
+    main(arguments.start_date, arguments.end_date, arguments.incremental)

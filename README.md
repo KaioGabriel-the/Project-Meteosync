@@ -170,7 +170,6 @@ meteosync/
 3. Edite o `.env` e preencha as senhas e chaves necessárias. Gere uma chave Fernet para o Airflow e segredos aleatórios para as aplicações:
    ```dotenv
    OPENWEATHER_API_KEY=
-   VISUAL_CROSSING_API_KEY=
    AIRFLOW_DB_USER=airflow
    AIRFLOW_DB_PASSWORD=senha_url_safe
    AIRFLOW_DB_NAME=airflow
@@ -200,6 +199,8 @@ Suba o cluster completo via Docker Compose:
 docker compose up -d
 ```
 
+O Compose constrói a imagem do Airflow com as dependências dos ingestors na primeira execução.
+
 ### 5.4. Portas de Acesso às Interfaces Web
 
 | Serviço | URL | Credenciais Padrão |
@@ -224,6 +225,12 @@ Você pode executar a ingestão diretamente no terminal:
 ```bash
 # Ingestão Open-Meteo
 python -m scripts.ingest_open_meteo
+
+# Ingestão incremental da última hora disponível em UTC
+python -m scripts.ingest_open_meteo --incremental
+
+# Execução histórica (até 30 dias)
+python -m scripts.ingest_open_meteo --start-date 2026-10-01 --end-date 2026-10-30
 
 # Ingestão OpenWeather
 python -m scripts.ingest_openweather
