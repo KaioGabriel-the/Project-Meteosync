@@ -60,7 +60,7 @@ flowchart LR
 
 **Objetivo:** Consumir as APIs Open-Meteo e OpenWeather de forma resiliente, registrando telemetria de rede e persistindo os JSONs originais íntegros no MinIO S3.
 
-- [ ] **TASK-2.1: Desenvolvimento do Ingestor Open-Meteo (`scripts/ingest_open_meteo.py`)**
+- [x] **TASK-2.1: Desenvolvimento do Ingestor Open-Meteo (`scripts/ingest_open_meteo.py`)**
   - **Descrição:** Implementar cliente HTTP com `requests` ou `urllib3` com retry automático (exponential backoff) para a endpoint Forecast/Archive da Open-Meteo.
   - **Parâmetros de Requisição:** `latitude`, `longitude`, `hourly=temperature_2m,relative_humidity_2m,precipitation,surface_pressure,wind_speed_10m,weather_code`, `timezone=UTC`.
   - **Captura de Metadados de Ingestão:** Timestamp de requisição, status code, tempo de resposta em milissegundos (latência) e tamanho do payload.
@@ -69,7 +69,7 @@ flowchart LR
     - Suporte a execução histórica (batch de até 30 dias retroativos) e execução incremental (hora corrente).
     - Logs detalhados em stdout e em arquivo.
 
-- [ ] **TASK-2.2: Desenvolvimento do Ingestor OpenWeather (`scripts/ingest_openweather.py`)**
+- [x] **TASK-2.2: Desenvolvimento do Ingestor OpenWeather (`scripts/ingest_openweather.py`)**
   - **Descrição:** Implementar cliente HTTP para a API OpenWeather (endpoints Current Weather API ou 5-day / 3-hour forecast / Timemachine de acordo com a chave contratada/gratuita).
   - **Parâmetros de Requisição:** `lat`, `lon`, `appid={OPENWEATHER_API_KEY}`, `units=standard` (Kelvin para conversão explícita no PySpark) ou `units=metric`.
   - **Captura de Metadados de Ingestão:** Timestamp de requisição, latência em ms, HTTP status code e erro caso quota seja excedida.
@@ -78,7 +78,7 @@ flowchart LR
     - Tratamento explícito de `HTTP 429` (Rate Limit) e `HTTP 401` (Invalid API Key).
     - Preservação intacta da árvore JSON hierárquica original (`main`, `wind`, `weather[0]`, `sys`, etc.).
 
-- [ ] **TASK-2.3: Módulo Utilitário de Conexão com Object Storage (`scripts/utils/s3_client.py`)**
+- [x] **TASK-2.3: Módulo Utilitário de Conexão com Object Storage (`scripts/utils/s3_client.py`)**
   - **Descrição:** Criar wrapper reutilizável sobre a biblioteca `boto3` para upload, listagem e verificação de integridade de arquivos no MinIO.
   - **Critérios de Aceite:**
     - Idempotência: não sobrescrever arquivos sem flag explícita.

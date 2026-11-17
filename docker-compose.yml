@@ -1,5 +1,8 @@
 x-airflow-common: &airflow-common
-  image: apache/airflow:2.8.1-python3.10
+  image: meteosync-airflow:2.8.1
+  build:
+    context: .
+    dockerfile: Dockerfile.airflow
   env_file:
     - .env
   environment: &airflow-common-env
@@ -9,7 +12,6 @@ x-airflow-common: &airflow-common
     AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:?Set AIRFLOW_FERNET_KEY in .env}
     AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_WEBSERVER_SECRET_KEY:?Set AIRFLOW_WEBSERVER_SECRET_KEY in .env}
     OPENWEATHER_API_KEY: ${OPENWEATHER_API_KEY:-}
-    VISUAL_CROSSING_API_KEY: ${VISUAL_CROSSING_API_KEY:-}
     MINIO_ROOT_USER: ${MINIO_ROOT_USER:?Set MINIO_ROOT_USER in .env}
     MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD in .env}
     MINIO_ENDPOINT_URL: ${MINIO_ENDPOINT_URL:?Set MINIO_ENDPOINT_URL in .env}

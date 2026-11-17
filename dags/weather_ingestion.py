@@ -33,12 +33,12 @@ def run_open_meteo_ingestion():
     main()
 
 
-def run_visual_crossing_ingestion():
+def run_openweather_ingestion():
     """
-    Executa a ingestão da API Visual Crossing.
+    Executa a ingestão da API OpenWeather.
     """
 
-    from scripts.ingest_visual_crossing import main
+    from scripts.ingest_openweather import main
 
     main()
 
@@ -76,10 +76,10 @@ with DAG(
     )
 
     # --------------------------------------
-    # Tarefa 2: Visual Crossing
+    # Tarefa 2: OpenWeather
     # --------------------------------------
 
-    ingest_visual_crossing = PythonOperator(
-        task_id="ingest_visual_crossing",
-        python_callable=run_visual_crossing_ingestion,
+    ingest_openweather = PythonOperator(
+        task_id="ingest_openweather",
+        python_callable=run_openweather_ingestion,
     )

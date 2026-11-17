@@ -5,8 +5,8 @@ from unittest.mock import Mock, patch
 from zoneinfo import ZoneInfo
 
 from config.cities import CITIES
-from scripts.ingest_open_meteo import fetch_weather as fetch_open_meteo
-from scripts.ingest_visual_crossing import fetch_weather as fetch_visual_crossing
+from scripts.ingest_open_meteo import fetch_weather_with_telemetry
+from scripts.ingest_openweather import fetch_openweather
 from scripts.utils.date_ranges import previous_complete_date_range
 
 
@@ -66,38 +66,36 @@ class CityCatalogTests(unittest.TestCase):
         self.assertEqual((manaus_end - manaus_start).days, 9)
 
 
-class IngestionTimezoneTests(unittest.TestCase):
-    def test_open_meteo_request_uses_city_timezone(self):
-        response = Mock()
+class IngestionRequestTests(unittest.TestCase):
+    def test_open_meteo_request_uses_utc_timezone(self):
+        response = Mock(status_code=200, content=b"{}")
         response.json.return_value = {}
         city = next(city for city in CITIES if city["city_id"] == "manaus")
+        session = Mock()
+        session.get.return_value = response
 
-        with patch(
-            "scripts.ingest_open_meteo.requests.get",
-            return_value=response,
-        ) as request:
-            fetch_open_meteo(city, date(2024, 1, 1), date(2024, 1, 10))
+        with patch("scripts.ingest_open_meteo.get_resilient_session", return_value=session):
+            fetch_weather_with_telemetry(city, date(2024, 1, 1), date(2024, 1, 10))
 
         self.assertEqual(
-            request.call_args.kwargs["params"]["timezone"],
-            "America/Manaus",
+            session.get.call_args.kwargs["params"]["timezone"],
+            "UTC",
         )
 
-    def test_visual_crossing_request_uses_city_timezone(self):
-        response = Mock()
-        response.json.return_value = {}
+    def test_openweather_request_uses_kelvin_and_city_coordinates(self):
+        response = Mock(status_code=200, content=b"{}")
+        response.json.return_value = {"main": {"temp": 300}, "weather": [{"id": 800}]}
+        session = Mock()
+        session.get.return_value = response
         city = next(city for city in CITIES if city["city_id"] == "manaus")
 
-        with patch(
-            "scripts.ingest_visual_crossing.requests.get",
-            return_value=response,
-        ) as request:
-            fetch_visual_crossing(city, date(2024, 1, 1), date(2024, 1, 10))
+        fetch_openweather(city, api_key="test-key", session=session)
 
-        self.assertEqual(
-            request.call_args.kwargs["params"]["timezone"],
-            "America/Manaus",
-        )
+        params = session.get.call_args.kwargs["params"]
+        self.assertEqual(params["lat"], city["latitude"])
+        self.assertEqual(params["lon"], city["longitude"])
+        self.assertEqual(params["appid"], "test-key")
+        self.assertEqual(params["units"], "standard")
 
 
 if __name__ == "__main__":
